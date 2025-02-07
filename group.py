@@ -133,7 +133,7 @@ def attack_command(message):
             increment_user_attacks(user_id)
 
         current_attacker = user_id
-        attack_duration = 180
+        attack_duration = 120
         attack_end_time = datetime.now() + timedelta(seconds=attack_duration)
 
         bot.send_message(
