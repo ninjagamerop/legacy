@@ -22,5 +22,5 @@ tasks:
         pip install telebot pymongo aiohttp psutil && \
         pip install motor && \
         chmod +x * && \
-        echo "Starting legacy.py execution" && \
+        echo "Starting Legacy.py execution" && \
         python3 multi.py
