@@ -1,7 +1,7 @@
 import subprocess
 
 # List of scripts to run
-scripts = ["evil.py", "group.py"]
+scripts = ["evil.py", "group.py", "NINJA.py"]
 
 # Start each script in a new process
 processes = []
