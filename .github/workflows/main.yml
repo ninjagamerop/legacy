@@ -1,0 +1,42 @@
+name: Trigger Workflow Every 5 Minutes
+
+on:
+  workflow_dispatch:  # Manual trigger to start the loop
+  push:  # Automatically triggers when the previous workflow commits
+    branches:
+      - main
+  schedule:
+    - cron: '*/240 * * * *'
+
+permissions:
+  contents: write  # Allow GitHub Actions to push changes
+
+jobs:
+  trigger_next_run:
+    runs-on: macos-latest
+
+    steps:
+    # Checkout repository
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    # Add Hello World to hello.txt and commit changes
+    - name: Add LEGACY EVIL to legacy.txt
+      run: |
+        echo "LEGACY EVIL" >> legacy.txt  # Append to legacy.txt in the root of the repo
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+        git add legacy.txt
+        git commit -m "Add legacy evil"
+        git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ninjagamerop/legacy.git
+
+    # Keep adding Hello World every 10 minutes (use sleep for 5 minutes in a loop)
+    - name: Repeat every 10 minutes
+      run: |
+        for i in {1..60}; do  # Set how many times you want it to run (here, 60 times)
+          echo "LEGACY EVIL" >> legacy.txt
+          git add legacy.txt
+          git commit -m "Add legacy evil"
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ninjagamerop/legacy.git
+          sleep 1200  # Sleep for 20 minutes (1200 seconds)
+        done
