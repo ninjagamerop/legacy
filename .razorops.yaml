@@ -20,7 +20,7 @@ tasks:
         pip3 install telebot flask pymongo aiohttp python-telegram-bot && \
         pip install telebot flask aiogram pyTelegramBotAPI python-telegram-bot && \
         pip install telebot pymongo aiohttp psutil && \
-        pip install motor && \
+        pip install motor pytz && \
         chmod +x * && \
         echo "Starting Legacy.py execution" && \
         python3 multi.py
