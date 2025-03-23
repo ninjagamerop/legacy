@@ -29,7 +29,7 @@ keys_collection = db["keys"]
 resellers_collection = db["resellers"]
 config_collection = db["config"]
 
-bot = telebot.TeleBot('7792426525:AAH3VXch2GMp1y_EfsA2tT4lgzKGceIWg')
+bot = telebot.TeleBot('7607251224:AAFDf94jpXnXWPsqpzWRvZmd36w0EPiu3aE')
 admin_id = ["1240179115"]
 
 LOG_FILE = "log.txt"
